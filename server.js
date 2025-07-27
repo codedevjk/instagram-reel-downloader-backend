@@ -11,96 +11,84 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Function to get reel download URL using your specific RapidAPI
+// Replace the getReelDownloadUrl function with this improved version:
 async function getReelDownloadUrl(reelUrl) {
-  try {
-    console.log('Using your RapidAPI for:', reelUrl);
-    
-    // Dynamically import node-fetch
-    const fetch = (await import('node-fetch')).default;
-    
-    // Use your specific RapidAPI endpoint
-    const apiUrl = `https://instagram-reels-downloader-api.p.rapidapi.com/download?url=${encodeURIComponent(reelUrl)}`;
-    
-    console.log('Calling your RapidAPI endpoint:', apiUrl);
-    
-    const response = await fetch(apiUrl, {
-      method: 'GET',
-      headers: {
-        'x-rapidapi-key': '5c4257cfa5msh402d7a665519259p1c24fajsn6f54b84f399b',
-        'x-rapidapi-host': 'instagram-reels-downloader-api.p.rapidapi.com'
-      }
-    });
-
-    console.log('RapidAPI response status:', response.status);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('RapidAPI error response:', errorText);
-      throw new Error(`RapidAPI request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    console.log('RapidAPI successful response:', JSON.stringify(data, null, 2));
-
-    // Extract video URL from the response
-    // Try multiple possible paths based on common API response structures
-    if (data.videoUrl) {
-      return data.videoUrl;
-    }
-    
-    if (data.data && data.data.videoUrl) {
-      return data.data.videoUrl;
-    }
-    
-    if (data.url) {
-      return data.url;
-    }
-    
-    if (data.downloadUrl) {
-      return data.downloadUrl;
-    }
-    
-    if (data.result && data.result.url) {
-      return data.result.url;
-    }
-
-    // Try to find any URL in the response
-    const findUrl = (obj) => {
-      if (!obj || typeof obj !== 'object') return null;
+    try {
+      console.log('Using your RapidAPI for:', reelUrl);
       
-      // Look for common URL field names
-      const urlFields = ['videoUrl', 'url', 'downloadUrl', 'mediaUrl', 'link', 'video_url'];
-      for (const field of urlFields) {
-        if (obj[field] && typeof obj[field] === 'string' && (obj[field].includes('http') || obj[field].includes('.mp4'))) {
-          return obj[field];
+      // Dynamically import node-fetch
+      const fetch = (await import('node-fetch')).default;
+  
+      // Use your specific RapidAPI endpoint
+      const apiUrl = `https://instagram-reels-downloader-api.p.rapidapi.com/download?url=${encodeURIComponent(reelUrl)}`;
+      
+      console.log('Calling your RapidAPI endpoint:', apiUrl);
+      
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+          'x-rapidapi-key': '5c4257cfa5msh402d7a665519259p1c24fajsn6f54b84f399b',
+          'x-rapidapi-host': 'instagram-reels-downloader-api.p.rapidapi.com'
+        }
+      });
+  
+      console.log('RapidAPI response status:', response.status);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('RapidAPI error response:', errorText);
+        throw new Error(`RapidAPI request failed: ${response.status} ${response.statusText}`);
+      }
+  
+      const data = await response.json();
+      console.log('RapidAPI successful response:', JSON.stringify(data, null, 2));
+  
+      // Check if response indicates success and no error
+      if (!data.success || (data.data && data.data.error)) {
+        throw new Error('RapidAPI returned an error: ' + (data.data.message || 'Unknown error'));
+      }
+  
+      // Extract video URL from the response structure shown in your logs
+      if (data.data && data.data.medias && Array.isArray(data.data.medias)) {
+        // Look for video media first
+        const videoMedia = data.data.medias.find(media => 
+          media.type === 'video' && media.url
+        );
+        
+        if (videoMedia) {
+          console.log('Found video URL:', videoMedia.url);
+          return videoMedia.url;
+        }
+        
+        // If no specific video found, try first media with URL
+        const firstMedia = data.data.medias.find(media => media.url);
+        if (firstMedia) {
+          console.log('Found first media URL:', firstMedia.url);
+          return firstMedia.url;
         }
       }
-      
-      // Recursively search nested objects
-      for (const key in obj) {
-        const result = findUrl(obj[key]);
-        if (result) return result;
+  
+      // Fallback: check other possible paths
+      const possiblePaths = [
+        data.data?.url,
+        data.url,
+        data.downloadUrl,
+        data.videoUrl
+      ];
+  
+      for (const url of possiblePaths) {
+        if (url && typeof url === 'string' && url.includes('http')) {
+          console.log('Found URL in fallback path:', url);
+          return url;
+        }
       }
-      return null;
-    };
-
-    const videoUrl = findUrl(data);
-    if (videoUrl) {
-      return videoUrl;
+  
+      throw new Error('No downloadable video found in RapidAPI response. Response structure may have changed.');
+    } catch (error) {
+      console.error('RapidAPI error:', error.message);
+      throw new Error(`RapidAPI failed: ${error.message}`);
     }
-
-    // If we can't find a direct URL, check if the whole response is a URL
-    if (typeof data === 'string' && data.includes('http')) {
-      return data;
-    }
-
-    throw new Error('No downloadable video found in RapidAPI response. Response structure may be different than expected.');
-  } catch (error) {
-    console.error('RapidAPI error:', error.message);
-    throw new Error(`RapidAPI failed: ${error.message}`);
   }
-}
 
 // Route to handle reel download
 app.post('/download', async (req, res) => {
