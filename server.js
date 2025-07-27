@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const puppeteer = require('puppeteer');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -12,160 +11,223 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Function to get reel download URL using Puppeteer
+// Function to get reel download URL using multiple fallback methods
 async function getReelDownloadUrl(reelUrl) {
-  let browser;
-  try {
-    console.log('Launching browser for:', reelUrl);
-    
-    // Launch browser with optimized settings for Render
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--single-process'
-      ]
-    });
+  // Try multiple methods in order of reliability
+  const methods = [
+    tryScrapingMethod,
+    tryGraphQLMethod,
+    tryDirectApiMethod
+  ];
 
-    const page = await browser.newPage();
-    
-    // Set realistic user agent
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    // Set viewport
-    await page.setViewport({ width: 1920, height: 1080 });
-    
-    console.log('Navigating to Instagram page...');
-    
-    // Go to the reel URL with proper settings
-    await page.goto(reelUrl, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
-
-    console.log('Page loaded, waiting for content...');
-    
-    // Wait for video or main content to load
-    await page.waitForSelector('article, video, [role="main"]', { timeout: 15000 }).catch(() => {
-      console.log('Main content selector not found, continuing...');
-    });
-
-    // Extract video URL using multiple methods
-    const videoUrl = await page.evaluate(() => {
-      console.log('Searching for video URL in page...');
-      
-      // Method 1: Check video elements directly
-      const videoElements = document.querySelectorAll('video');
-      console.log('Found', videoElements.length, 'video elements');
-      
-      for (let video of videoElements) {
-        if (video.src && (video.src.includes('instagram') || video.src.includes('.mp4'))) {
-          console.log('Found video URL in video element');
-          return video.src;
-        }
-      }
-
-      // Method 2: Check for JSON data in scripts
-      const scripts = Array.from(document.querySelectorAll('script'));
-      console.log('Checking', scripts.length, 'script tags');
-      
-      for (let script of scripts) {
-        const content = script.textContent;
-        if (content && content.includes('video_url')) {
-          console.log('Found video_url in script content');
-          const match = content.match(/"video_url"\s*:\s*"([^"]+)"/);
-          if (match && match[1]) {
-            return match[1].replace(/\\u0026/g, '&');
-          }
-        }
-      }
-
-      // Method 3: Check for GraphQL data
-      for (let script of scripts) {
-        const content = script.textContent;
-        if (content && content.includes('graphql')) {
-          try {
-            const data = JSON.parse(content);
-            if (data && data.graphql && data.graphql.shortcode_media && data.graphql.shortcode_media.video_url) {
-              console.log('Found video URL in GraphQL data');
-              return data.graphql.shortcode_media.video_url;
-            }
-          } catch (e) {
-            // Not valid JSON, continue
-          }
-        }
-      }
-
-      // Method 4: Check meta tags
-      const metaVideo = document.querySelector('meta[property="og:video"]');
-      if (metaVideo) {
-        console.log('Found video URL in meta tag');
-        return metaVideo.getAttribute('content');
-      }
-
-      // Method 5: Look for any URLs that look like videos
-      const allLinks = Array.from(document.querySelectorAll('a, link'));
-      for (let link of allLinks) {
-        const href = link.getAttribute('href') || link.getAttribute('content');
-        if (href && (href.includes('.mp4') || (href.includes('video') && href.includes('instagram')))) {
-          console.log('Found video-like URL in links');
-          return href;
-        }
-      }
-
-      console.log('No video URL found in any method');
-      return null;
-    });
-
-    if (!videoUrl) {
-      // Try one more approach - get all network requests for video files
-      const videoRequests = await page.evaluate(() => {
-        // This would normally be done with request interception, but we'll try a different approach
-        // Look for video URLs in the entire page content
-        const pageContent = document.body.innerText;
-        const videoMatches = pageContent.match(/https?:\/\/[^\s"]+\.mp4[^\s"]*/g);
-        return videoMatches ? videoMatches[0] : null;
-      });
-
-      if (videoRequests) {
-        console.log('Found video URL from page content analysis');
-        return videoRequests;
-      }
-
-      throw new Error('Could not extract video URL from page content');
-    }
-
-    // Clean URL
-    let cleanUrl = videoUrl;
-    if (cleanUrl.startsWith('\\')) {
-      cleanUrl = cleanUrl.substring(1);
-    }
-    
+  for (const method of methods) {
     try {
-      cleanUrl = decodeURIComponent(cleanUrl);
-    } catch (e) {
-      console.log('Could not decode URL, using as-is');
+      console.log(`Trying method: ${method.name}`);
+      const result = await method(reelUrl);
+      if (result) {
+        console.log(`Success with method: ${method.name}`);
+        return result;
+      }
+    } catch (error) {
+      console.log(`Method ${method.name} failed:`, error.message);
+    }
+  }
+
+  throw new Error('All extraction methods failed. Instagram may have changed their structure.');
+}
+
+// Method 1: Web scraping approach
+async function tryScrapingMethod(reelUrl) {
+  try {
+    // Dynamically import node-fetch
+    const fetch = (await import('node-fetch')).default;
+    
+    const response = await fetch(reelUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    console.log('Successfully extracted video URL');
-    return cleanUrl;
+    const html = await response.text();
+
+    // Try multiple regex patterns to find video URL
+    const patterns = [
+      /"video_url"\s*:\s*"([^"]+)"/,
+      /video_url["']?\s*:\s*["']([^"']+)["']/,
+      /"og:video"\s*content\s*=\s*"([^"]+)"/i,
+      /property\s*=\s*["']og:video["']\s*content\s*=\s*["']([^"']+)["']/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        let videoUrl = match[1];
+        // Clean URL
+        if (videoUrl.startsWith('\\')) {
+          videoUrl = videoUrl.substring(1);
+        }
+        try {
+          videoUrl = decodeURIComponent(videoUrl);
+        } catch (e) {
+          // Ignore decode errors
+        }
+        // Validate URL format
+        if (videoUrl.includes('.mp4') || videoUrl.includes('instagram')) {
+          return videoUrl;
+        }
+      }
+    }
+
+    // Try to find video URL in script tags with JSON data
+    const scriptMatches = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi);
+    if (scriptMatches) {
+      for (const script of scriptMatches) {
+        try {
+          const jsonData = script.match(/>[^<]*({"video_url"[^}]+"})[^<]*</);
+          if (jsonData && jsonData[1]) {
+            const parsed = JSON.parse(jsonData[1]);
+            if (parsed.video_url) {
+              return parsed.video_url;
+            }
+          }
+        } catch (e) {
+          // Continue to next script tag
+        }
+      }
+    }
+
+    return null;
   } catch (error) {
-    console.error('Puppeteer error:', error.message);
-    if (error.stack) {
-      console.error('Stack trace:', error.stack);
+    console.log('Scraping method failed:', error.message);
+    return null;
+  }
+}
+
+// Method 2: GraphQL API approach
+async function tryGraphQLMethod(reelUrl) {
+  try {
+    const fetch = (await import('node-fetch')).default;
+    
+    // Extract shortcode from URL
+    const shortcode = reelUrl.match(/\/(?:reel|p)\/([A-Za-z0-9_-]+)/)?.[1];
+    if (!shortcode) return null;
+
+    const graphqlUrl = `https://www.instagram.com/graphql/query/?query_hash=b3055c01b9479c0110c9a45a5e7d5c0d&variables={"shortcode":"${shortcode}"}`;
+    
+    const response = await fetch(graphqlUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'X-IG-App-ID': '936619743392459',
+        'X-Requested-With': 'XMLHttpRequest'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`GraphQL request failed: ${response.status}`);
     }
-    throw new Error(`Failed to extract video: ${error.message}`);
-  } finally {
-    if (browser) {
-      console.log('Closing browser...');
-      await browser.close();
+
+    const data = await response.json();
+    
+    // Navigate through possible data structures
+    const paths = [
+      ['data', 'shortcode_media', 'video_url'],
+      ['graphql', 'shortcode_media', 'video_url'],
+      ['shortcode_media', 'video_url']
+    ];
+
+    for (const path of paths) {
+      let current = data;
+      let valid = true;
+      
+      for (const key of path) {
+        if (current && current[key] !== undefined) {
+          current = current[key];
+        } else {
+          valid = false;
+          break;
+        }
+      }
+      
+      if (valid && current) {
+        return current;
+      }
     }
+
+    return null;
+  } catch (error) {
+    console.log('GraphQL method failed:', error.message);
+    return null;
+  }
+}
+
+// Method 3: Direct API approach
+async function tryDirectApiMethod(reelUrl) {
+  try {
+    const fetch = (await import('node-fetch')).default;
+    
+    // Extract shortcode
+    const shortcode = reelUrl.match(/\/(?:reel|p)\/([A-Za-z0-9_-]+)/)?.[1];
+    if (!shortcode) return null;
+
+    const apiUrl = `https://www.instagram.com/p/${shortcode}?__a=1&__d=dis`;
+    
+    const response = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'X-IG-App-ID': '936619743392459'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Direct API request failed: ${response.status}`);
+    }
+
+    const text = await response.text();
+    
+    // Try to parse as JSON
+    try {
+      const data = JSON.parse(text);
+      
+      // Recursive function to find video_url in nested object
+      const findVideoUrl = (obj) => {
+        if (!obj || typeof obj !== 'object') return null;
+        
+        if (obj.video_url && typeof obj.video_url === 'string') {
+          return obj.video_url;
+        }
+        
+        for (const key in obj) {
+          const result = findVideoUrl(obj[key]);
+          if (result) return result;
+        }
+        return null;
+      };
+
+      return findVideoUrl(data);
+    } catch (parseError) {
+      // If not JSON, try regex on text
+      const match = text.match(/"video_url"\s*:\s*"([^"]+)"/);
+      if (match && match[1]) {
+        return match[1].replace(/\\u0026/g, '&');
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.log('Direct API method failed:', error.message);
+    return null;
   }
 }
 
@@ -191,13 +253,13 @@ app.post('/download', async (req, res) => {
       });
     }
 
-    // Get download URL using Puppeteer
+    // Get download URL using multiple methods
     const downloadUrl = await getReelDownloadUrl(url);
 
     if (!downloadUrl) {
       return res.status(404).json({ 
         success: false, 
-        message: 'Could not find downloadable video. The post might not contain a video or Instagram has blocked access.' 
+        message: 'Could not find downloadable video. The post might not contain a video or Instagram has updated their structure.' 
       });
     }
 
@@ -221,33 +283,26 @@ app.get('/', (req, res) => {
   res.json({ 
     message: 'Instagram Reel Downloader API is running!',
     timestamp: new Date().toISOString(),
-    version: '5.0 - Puppeteer Method'
+    version: '7.0 - Multi-Method Approach'
   });
 });
 
-// Test endpoint for Puppeteer
-app.get('/test-puppeteer', async (req, res) => {
-  let browser;
-  try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    const page = await browser.newPage();
-    await page.goto('https://example.com');
-    const title = await page.title();
-    await browser.close();
-    res.json({ success: true, title });
-  } catch (error) {
-    if (browser) await browser.close();
-    res.status(500).json({ success: false, error: error.message });
-  }
+// Test endpoint
+app.get('/test', (req, res) => {
+  res.json({ 
+    message: 'Multi-method Instagram Reel Downloader is working!',
+    methods: [
+      'tryScrapingMethod',
+      'tryGraphQLMethod', 
+      'tryDirectApiMethod'
+    ]
+  });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server is running on port ${PORT}`);
-  console.log('Instagram Reel Downloader with Puppeteer is ready!');
+  console.log('Instagram Reel Downloader with multi-method approach is ready!');
 });
 
 module.exports = app;
